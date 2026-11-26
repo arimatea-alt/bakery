@@ -1,0 +1,317 @@
+print("[AutoBake] starting")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer = Players.LocalPlayer
+
+local Client = require(ReplicatedStorage.Net.Client)
+local StateController = require(ReplicatedStorage.Client.Controllers.StateController)
+local BackpackItems = require(ReplicatedStorage.Client.Controllers.BackpackItems)
+local RecipeData = require(ReplicatedStorage.Shared.RecipeData)
+local ItemRegistry = require(ReplicatedStorage.Shared.ItemModules.ItemRegistry)
+
+-- Monkey-patch: ALWAYS force Quality=Perfect on every StartBaking (bypass minigame)
+local _origFire = Client.MachineAction.Fire
+Client.MachineAction.Fire = function(a1)
+    if type(a1) == "table" and a1.Action == "StartBaking" then
+        a1.Quality = "Perfect"
+    end
+    return _origFire(a1)
+end
+
+print("[AutoBake] requires ok")
+
+local Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
+local Window = Rayfield:CreateWindow({ Name = "Auto Bake", subtitle = "Build a Bakery", sidebarLayout = true })
+local Tab = Window:CreateTab({ name = "Bake", icon = 4483362458 })
+print("[AutoBake] GUI created")
+
+local tierNames = { "Easy", "Advanced", "Hard", "Very Hard", "Masterpiece" }
+local bakeTimes = { 6, 30, 105, 405, 900 }
+local selectedTier = 3
+local selectedShape = "BakingTray"
+local selectedQuality = "Normal"
+local selectedMixerRecipe = nil
+local selectedOvenRecipe = nil
+local autoMix = false
+local autoLoadOven = false
+local autoStart = false
+local autoInteract = false
+local opCounter = 0
+
+local function nextOp()
+    opCounter = opCounter + 1
+    return opCounter
+end
+
+local function getPlotsFolder()
+    return workspace:FindFirstChild("Plots")
+end
+
+local function getUserPlot()
+    local pf = getPlotsFolder()
+    if not pf then return nil end
+    for _, p in pf:GetChildren() do
+        local owner = p:GetAttribute("OwnerName")
+        if owner == LocalPlayer.Name or owner == LocalPlayer.DisplayName then
+            return p
+        end
+    end
+    return nil
+end
+
+local function getMixerId()
+    local plot = getUserPlot()
+    if not plot then return nil end
+    local furn = plot:FindFirstChild("Furniture")
+    if not furn then return nil end
+    for _, f in furn:GetChildren() do
+        if f.Name:find("Mixer") then
+            return f:GetAttribute("PlacementId")
+        end
+    end
+    return nil
+end
+
+local function getOvenIds()
+    local ids = {}
+    local plot = getUserPlot()
+    if not plot then return ids end
+    local furn = plot:FindFirstChild("Furniture")
+    if not furn then return ids end
+    for _, f in furn:GetChildren() do
+        if f.Name:find("Oven") then
+            local pid = f:GetAttribute("PlacementId")
+            if pid then table.insert(ids, pid) end
+        end
+    end
+    return ids
+end
+
+local mixerRecipeNames = {}
+for _, rec in RecipeData.MixerRecipes do
+    table.insert(mixerRecipeNames, rec.OutputName)
+end
+selectedMixerRecipe = mixerRecipeNames[1]
+
+local ovenRecipeNames = {}
+for _, rec in RecipeData.Recipes do
+    table.insert(ovenRecipeNames, rec.Output.Name)
+end
+table.sort(ovenRecipeNames)
+selectedOvenRecipe = ovenRecipeNames[1]
+
+local function findOvenRecipe(name)
+    for _, rec in RecipeData.Recipes do
+        if rec.Output.Name == name then return rec end
+    end
+    return nil
+end
+
+Tab:CreateDropdown({
+    name = "Bake Tier",
+    options = tierNames,
+    value = tierNames[selectedTier],
+    callback = function(v)
+        for i, n in tierNames do
+            if n == v then selectedTier = i break end
+        end
+        Window:Notify({ title = "Tier", content = tierNames[selectedTier] .. " (" .. bakeTimes[selectedTier] .. "s)" })
+    end,
+})
+
+Tab:CreateDropdown({
+    name = "Shape (pan)",
+    options = { "LoafPan", "BakingTray", "MuffinTin", "TartTin", "CakePan", "PoundPan", "WaffleIron", "Ramekin", "MadeleineMold" },
+    value = selectedShape,
+    callback = function(v) selectedShape = v end,
+})
+
+Tab:CreateDropdown({
+    name = "Quality (manual)",
+    options = { "Normal", "Good" },
+    value = selectedQuality,
+    callback = function(v) selectedQuality = v end,
+})
+
+Tab:CreateDropdown({
+    name = "Mixer Recipe",
+    options = mixerRecipeNames,
+    value = selectedMixerRecipe,
+    callback = function(v) selectedMixerRecipe = v end,
+})
+
+Tab:CreateDropdown({
+    name = "Oven Recipe (info)",
+    options = ovenRecipeNames,
+    value = selectedOvenRecipe,
+    callback = function(v)
+        selectedOvenRecipe = v
+        local rec = findOvenRecipe(v)
+        if rec then
+            local diff = ItemRegistry.GetDifficulty(rec.Output.Name) or 1
+            local bt = RecipeData.BakeSecondsByDifficulty[diff] or 0
+            local inputs = {}
+            for _, inp in rec.Inputs do table.insert(inputs, inp.Name) end
+            local txt = "Shape: " .. rec.ShapeId .. "\nTemp: " .. rec.TemperatureC .. "C\nDifficulty: " .. diff .. " (" .. (tierNames[diff] or "?") .. ")\nBake: " .. bt .. "s\nInputs: " .. table.concat(inputs, ", ")
+            if rec.ModifierInput then
+                txt = txt .. "\nFlavor: " .. rec.ModifierInput.ItemName
+            end
+            Window:Notify({ title = v, content = txt })
+        end
+    end,
+})
+
+Tab:CreateToggle({
+    name = "Auto Mix (mixer)",
+    description = "Loads ingredients + starts mixing for selected recipe.",
+    callback = function(v) autoMix = v end,
+})
+
+Tab:CreateToggle({
+    name = "Auto Load Dough -> Oven",
+    description = "Loads dough from backpack into idle ovens.",
+    callback = function(v) autoLoadOven = v end,
+})
+
+Tab:CreateToggle({
+    name = "Auto Start Baking",
+    description = "Starts baking on loaded ovens.",
+    callback = function(v) autoStart = v end,
+})
+
+Tab:CreateToggle({
+    name = "Auto Interact (idle ovens)",
+    description = "Interacts with idle ovens to take output.",
+    callback = function(v) autoInteract = v end,
+})
+
+Tab:CreateButton({
+    name = "Refresh status",
+    callback = function()
+        local plot = getUserPlot()
+        if not plot then Window:Notify({ title = "Auto Bake", content = "Plot not found" }) return end
+        local lines = {}
+        local mid = getMixerId()
+        if mid then
+            local m = StateController.GetKey("Machine", mid)
+            table.insert(lines, "Mixer: " .. (m and m.State or "?"))
+        end
+        for _, pid in getOvenIds() do
+            local m = StateController.GetKey("Machine", pid)
+            table.insert(lines, "Oven: " .. (m and m.State or "?"))
+        end
+        Window:Notify({ title = "Status", content = table.concat(lines, "\n") })
+    end,
+})
+
+local function findMixerRecipe(name)
+    for _, rec in RecipeData.MixerRecipes do
+        if rec.OutputName == name then return rec end
+    end
+    return nil
+end
+
+local function loadIngredientsForRecipe(rec)
+    local mid = getMixerId()
+    if not mid then return false end
+    for _, ing in rec.Ingredients do
+        local needed = ing.Count or 1
+        local stacks = BackpackItems.Stacks(function(itemName) return itemName == ing.Name end)
+        local loaded = 0
+        for _, st in stacks do
+            if loaded >= needed then break end
+            local units = math.min(st.Count, needed - loaded)
+            for i = 1, units do
+                local unit = BackpackItems.ResolveUnit({ ItemName = ing.Name, StackId = st.StackId })
+                if unit then
+                    Client.MachineAction.Fire({
+                        PlacementId = mid,
+                        Action = "Interact",
+                        ItemName = unit.ItemName,
+                        StackId = unit.StackId,
+                        Modifiers = unit.Modifiers,
+                        OpId = nextOp(),
+                    })
+                    loaded = loaded + 1
+                end
+            end
+        end
+        if loaded < needed then
+            Window:Notify({ title = "Auto Mix", content = "Missing " .. ing.Name .. " (" .. (needed - loaded) .. ")" })
+            return false
+        end
+    end
+    return true
+end
+
+task.spawn(function()
+    while true do
+        task.wait(0.2)
+        if autoMix then
+            local mid = getMixerId()
+            if mid then
+                local m = StateController.GetKey("Machine", mid)
+                if m and m.State == "Idle" then
+                    local rec = findMixerRecipe(selectedMixerRecipe)
+                    if rec then
+                        if loadIngredientsForRecipe(rec) then
+                            Client.MachineAction.Fire({
+                                PlacementId = mid,
+                                Action = "StartMixing",
+                                RecipeName = rec.OutputName,
+                                OpId = nextOp(),
+                            })
+                        end
+                    end
+                end
+            end
+        end
+
+        local effectiveLoad = autoLoadOven
+        local effectiveStart = autoStart
+
+        for _, pid in getOvenIds() do
+            local m = StateController.GetKey("Machine", pid)
+            if not m then continue end
+
+            if effectiveLoad and m.State == "Idle" then
+                local stacks = BackpackItems.Stacks(function(itemName) return itemName:lower():find("dough") ~= nil end)
+                if stacks and #stacks > 0 then
+                    local st = stacks[1]
+                    local unit = BackpackItems.ResolveUnit({ ItemName = st.ItemName, StackId = st.StackId })
+                    if unit then
+                        Client.MachineAction.Fire({
+                            PlacementId = pid,
+                            Action = "Interact",
+                            ItemName = unit.ItemName,
+                            StackId = unit.StackId,
+                            Modifiers = unit.Modifiers,
+                            OpId = nextOp(),
+                        })
+                    end
+                end
+            end
+
+            if effectiveStart and m.State == "Loaded" then
+                Client.MachineAction.Fire({
+                    PlacementId = pid,
+                    Action = "StartBaking",
+                    ShapeId = selectedShape,
+                    Quality = selectedQuality,
+                    OpId = nextOp(),
+                })
+            end
+
+            if autoInteract and m.State == "Idle" then
+                Client.MachineAction.Fire({
+                    PlacementId = pid,
+                    Action = "Interact",
+                    OpId = nextOp(),
+                })
+            end
+        end
+    end
+end)
+
+Window:Notify({ title = "Auto Bake", content = "Loaded. Minigame bypass ALWAYS ON (Perfect)." })
+print("[AutoBake] done")
