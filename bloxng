@@ -1,0 +1,130 @@
+print("[AutoFarm] starting")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local LocalPlayer = Players.LocalPlayer
+
+local Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
+local Window = Rayfield:CreateWindow({ Name = "Auto Farm", subtitle = "BloxNG Crash", sidebarLayout = true })
+local Tab = Window:CreateTab({ name = "Farm", icon = 4483362458 })
+print("[AutoFarm] GUI created")
+
+local autoFarm = false
+local autoRespawn = false
+local autoBring = false
+local crashSpeed = 300
+local crashDir = Vector3.new(0, 0, 1)
+
+local function getCarCommand()
+    local remotes = ReplicatedStorage:FindFirstChild("SoftBody") and ReplicatedStorage.SoftBody:FindFirstChild("Remotes")
+    return remotes and remotes:FindFirstChild("CarCommand")
+end
+
+local function getCar()
+    local cars = workspace:FindFirstChild("CrashTest") and workspace.CrashTest:FindFirstChild("Cars")
+    if not cars then return nil end
+    for _, c in cars:GetChildren() do
+        if c.Name:find(LocalPlayer.Name) then return c end
+    end
+    for _, c in cars:GetChildren() do
+        local seat = c:FindFirstChild("DriverSeat")
+        if seat and seat.Occupant then return c end
+    end
+    return nil
+end
+
+local function getBalance()
+    local hud = LocalPlayer.PlayerGui:FindFirstChild("MoneyHud")
+    if not hud then return 0 end
+    local bal = hud:FindFirstChild("Balance", true)
+    if not bal then return 0 end
+    local num = bal.Text:gsub("[^%d]", "")
+    return tonumber(num) or 0
+end
+
+local function fireCmd(cmd)
+    local cc = getCarCommand()
+    if cc and cc:IsA("RemoteEvent") then
+        cc:FireServer(cmd)
+    end
+end
+
+Tab:CreateToggle({
+    name = "Auto Farm (crash loop)",
+    description = "Teleports car to wall and crashes at high speed, looping.",
+    callback = function(v) autoFarm = v end,
+})
+
+Tab:CreateToggle({
+    name = "Auto Respawn",
+    description = "Respawns car after crash.",
+    callback = function(v) autoRespawn = v end,
+})
+
+Tab:CreateToggle({
+    name = "Auto Bring",
+    description = "Teleports car to you periodically.",
+    callback = function(v) autoBring = v end,
+})
+
+Tab:CreateSlider({
+    name = "Crash Speed",
+    range = { 100, 600 },
+    value = 300,
+    callback = function(v) crashSpeed = v end,
+})
+
+Tab:CreateButton({
+    name = "Respawn Car",
+    callback = function() fireCmd("respawn") end,
+})
+
+Tab:CreateButton({
+    name = "Bring Car",
+    callback = function() fireCmd("bring") end,
+})
+
+Tab:CreateButton({
+    name = "Refresh Money",
+    callback = function()
+        Window:Notify({ title = "Money", content = "$" .. getBalance() })
+    end,
+})
+
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        if not autoFarm then continue end
+        local car = getCar()
+        if not car then
+            fireCmd("respawn")
+            task.wait(2)
+            continue
+        end
+        local before = getBalance()
+        local startPos = Vector3.new(17966, 195, -15900)
+        car:PivotTo(CFrame.new(startPos, startPos + crashDir))
+        task.wait(0.3)
+        for i = 1, 15 do
+            if not autoFarm then break end
+            if car.PrimaryPart then
+                car.PrimaryPart.AssemblyLinearVelocity = crashDir * crashSpeed
+            end
+            task.wait(0.1)
+        end
+        task.wait(1.5)
+        local after = getBalance()
+        Window:Notify({ title = "Farm", content = "Earned: $" .. (after - before) .. " | Total: $" .. after })
+        if autoRespawn then
+            fireCmd("respawn")
+            task.wait(2)
+        end
+        if autoBring then
+            fireCmd("bring")
+            task.wait(1)
+        end
+    end
+end)
+
+Window:Notify({ title = "Auto Farm", content = "Loaded. Toggle Auto Farm to start." })
+print("[AutoFarm] done")
